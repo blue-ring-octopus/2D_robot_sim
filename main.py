@@ -2,13 +2,15 @@ import keyboard
 import cv2
 import time
 import numpy as np
-import copy
+from copy import deepcopy
 from scipy.spatial import KDTree
 import matplotlib.pyplot as plt
+from EKF_SLAM import EKF_SLAM
+from graph_SLAM import Graph_SLAM
 plt.figure()
 
 def angle_wrapping(theta):
-    return copy.deepcopy(np.arctan2(np.sin(theta), np.cos(theta)))
+    return deepcopy(np.arctan2(np.sin(theta), np.cos(theta)))
 
 def visualize(world,plot_resolution):
     def draw_robot(image, world, pose, radius, color, alpha):
@@ -16,7 +18,7 @@ def visualize(world,plot_resolution):
         end_point=(int(start_point[0]+40*np.cos(pose[2])), int(start_point[1]+40*np.sin(pose[2])))
         image = cv2.arrowedLine(image, start_point, end_point,
                                          (0, 0, 0), 2)
-        tem = copy.deepcopy(image)
+        tem = deepcopy(image)
         tem= cv2.circle(tem, start_point, int(radius*plot_resolution),color, -1)
         image=cv2.addWeighted(image, 1-alpha, tem, alpha, 0)
         return image
@@ -30,25 +32,51 @@ def visualize(world,plot_resolution):
            angle=angle*180/np.pi, startAngle=0, endAngle=360, color=(255,255,0), thickness=2)
         return image 
     
-    image=copy.deepcopy(world.bkg_map)
+    def draw_graph(image, graph):
+        if len(graph.edges):
+            thickness=[np.log(np.linalg.det(edge.omega)+1) for edge in graph.edges]
+            thickness_range=np.max(thickness)-np.min(thickness)
+            thickness=thickness/thickness_range*4
+            thickness=thickness+1-np.min(thickness)
+            thickness=np.clip(thickness, 1,5)
+        for i,edge in enumerate(graph.edges):
+            start_point=(edge.node1.x[0:2]+world.origin)*plot_resolution
+            end_point=(edge.node2.x[0:2]+world.origin)*plot_resolution
+            print(thickness[i])
+            if edge.type=="odom":
+                color=(255, 0, 0)
+            elif edge.type=="measurement":
+                color=(0, 255, 255)    
+            else:
+                color=(0, 0, 255)    
+            image=cv2.line(image, (int(start_point[0]),int(start_point[1]) ), (int(end_point[0]),int(end_point[1]) ),color, int((thickness[i])))
+            
+        for node in graph.nodes:
+            x=(node.x[0:2]+world.origin)*plot_resolution
+            if node.type=="pose":
+                color=(0,0,255)
+            else:
+                color=(0,255,255)
+            image=cv2.circle(image, (int(x[0]),int(x[1])) , int(0.05*plot_resolution),color, 2)
+        return image
+    
+    image=deepcopy(world.bkg_map)
     w=int(image.shape[0]*plot_resolution*world.map_resolution)
     h=int(image.shape[1]*plot_resolution*world.map_resolution)
     image= cv2.resize(image, (w,h), interpolation=cv2.INTER_NEAREST)
+    if world.robot.slam.__class__.__name__=="Graph_SLAM":
+        image=draw_graph(image, world.robot.slam.front_end)
 
     image=draw_robot(image,world, world.robot.x, world.robot.radius,  (131,46,75), 0.1)
-    
     image=draw_robot(image,world, world.robot.odom, world.robot.radius, (131,46,75), 1)
     
-    image=draw_uncertainty(image, world.robot.odom[0:2], world.robot.covariance[0:2, 0:2] )
-    # for i,obs in enumerate(world.robot.feature):
-    #     loc=(np.asarray(obs)+np.asarray(world.origin))*plot_resolution
-    #     image= cv2.circle(image, (int(loc[0]),int(loc[1])), 2, (0,0,255), -1)
-    #     image=draw_uncertainty(image, loc, world.robot.covariance[i+3:i+5, i+3:i+5])
-    for i in range(int((len(world.robot.odom)-3)/2)):
+    if world.robot.slam.__class__.__name__=="EKF_SLAM":
+        image=draw_uncertainty(image, world.robot.odom[0:2], world.robot.covariance[0:2, 0:2] )
+        for i in range(int((len(world.robot.odom)-3)/2)):
+            loc=(world.robot.odom[2*i+3:2*i+5]+np.asarray(world.origin))*plot_resolution
+            image= cv2.circle(image, (int(loc[0]),int(loc[1])), 2, (0,0,255), -1)
+            image=draw_uncertainty(image, world.robot.odom[2*i+3:2*i+5], world.robot.covariance[2*i+3:2*i+5, 2*i+3:2*i+5])
         
-        loc=(world.robot.odom[2*i+3:2*i+5]+np.asarray(world.origin))*plot_resolution
-        image= cv2.circle(image, (int(loc[0]),int(loc[1])), 2, (0,0,255), -1)
-        image=draw_uncertainty(image, world.robot.odom[2*i+3:2*i+5], world.robot.covariance[2*i+3:2*i+5, 2*i+3:2*i+5])
     cv2.imshow('test', cv2.flip(image, 0))
 
 
@@ -69,7 +97,7 @@ def rotational_matrix(theta):
                        [-np.sin(theta), np.cos(theta)]])
 
 class World:
-    def __init__(self, bkg_map, origin, map_resolution):
+    def __init__(self, bkg_map, origin, map_resolution, agents):
         self.t=0
         self.bkg_map=bkg_map
         self.map_resolution=map_resolution        
@@ -84,7 +112,8 @@ class World:
         for i, idx in enumerate(obs_loc[0]):
             obst_loc.append(np.asarray(([(obs_loc[1][i]+0.5)*map_resolution-origin[0],(obs_loc[0][i]+0.5)*map_resolution-origin[1]])))
             self.obstacles.append(Obstacle(obst_loc[-1], obs_id=i, is_feature=(np.random.uniform(0,1)<0.2)))
-        self.robot=Robot(self, [0.05,0.1])
+        self.robot=agents[0]
+        self.robot.world=self
         self.obstacles_tree=KDTree(obst_loc)
         
     def collision_check(self):
@@ -99,6 +128,7 @@ class World:
 
        # print(dist)
     def step(self, dt):
+        self.dt=dt
         self.robot.input_eval()
         self.collision_check()
         self.robot.step(dt)
@@ -127,144 +157,26 @@ class Camera:
               world.obstacles[i].id] for i in idx ]   
         
         z=[obs for obs in z if abs(obs[1])<=self.fov/2]  
-        #for i in idx:
-        #    plt.plot(self.robot.world.t, world.obstacles[i].loc[0],'.', color=(0.5,0,0), alpha=0.1)
-        #    plt.plot(self.robot.world.t, world.obstacles[i].loc[1],'.', color=(0,0,0.5), alpha=0.1)
-
-        z=[np.asarray([abs(np.random.normal(obs[0], self.range_noise)), angle_wrapping(np.random.normal(obs[1], self.bearing_noise)), obs[2] ])for obs in z]
+        z=[[abs(np.random.normal(obs[0], self.range_noise)), angle_wrapping(np.random.normal(obs[1], self.bearing_noise)), obs[2] ]for obs in z]
         return z
-    
-class EKF_SLAM:
-    def __init__(self, robot):
-        self.robot=robot
-        self.mu=copy.deepcopy(robot.x[0:3])
-        self.sigma=np.zeros((3,3))
-        self.R=np.diag(robot.input_noise)**2
-        self.Q=np.diag([robot.camera.range_noise**2, robot.camera.bearing_noise**2])
-        self.feature={}
-      #  self.t=0
-    def predict(self, dt, u):
-        F=np.zeros((3,self.mu.shape[0]))
-        F[0:3,0:3]=np.eye(3)
-        
-        if u[1]>=0.01:
-            self.mu[0:3]+=np.asarray([-u[0]/u[1]*np.sin(self.mu[2])+u[0]/u[1]*np.sin(self.mu[2]+u[1]*dt),
-                                     u[0]/u[1]*np.cos(self.mu[2])-u[0]/u[1]*np.cos(self.mu[2]+u[1]*dt),
-                                     dt*u[1]])
-            self.mu[2]=angle_wrapping(self.mu[2])
-            
-            fx=np.eye(self.mu.shape[0])+F.T@np.asarray([[0,0,-u[0]/u[1]*np.cos(self.mu[2])+u[0]/u[1]*np.cos(self.mu[2]+u[1]*dt)], 
-                                                        [0,0,-u[0]/u[1]*np.sin(self.mu[2])+u[0]/u[1]*np.sin(self.mu[2]+u[1]*dt)],
-                                                        [0,0,0]])@F
-            
-            fu=np.asarray([[-1/u[1]*np.sin(self.mu[2])+1/u[1]*np.sin(self.mu[2]+u[1]*dt), 
-                           u[0]/(u[1]**2)*(np.sin(self.mu[2])+dt*u[1]*np.cos(self.mu[2]+u[1]*dt)-np.sin(self.mu[2]+u[1]*dt))],
-                           [1/u[1]*np.cos(self.mu[2])-1/u[1]*np.cos(self.mu[2]+u[1]*dt), 
-                        u[0]/(u[1]**2)*(-np.cos(self.mu[2])+dt*u[1]*np.sin(self.mu[2]+u[1]*dt)+np.cos(self.mu[2]+u[1]*dt))],
-                           [0, dt]])
-        else:
-            self.mu[0:3]+=np.asarray([dt*u[0]*np.cos(self.mu[2]),
-                                 dt*u[0]*np.sin(self.mu[2]),
-                                 dt*u[1]])
-            self.mu[2]=angle_wrapping(self.mu[2])
-            
-            fx=np.eye(self.mu.shape[0])+F.T@np.asarray([[0,0,-dt*u[0]*np.sin(self.mu[2])], 
-                                                        [0,0,dt*u[0]*np.cos(self.mu[2])],
-                                                        [0,0,0]])@F
-                           
-            fu=np.asarray([[dt*np.cos(self.mu[2]), 0],
-                           [dt*np.sin(self.mu[2]), 0],
-                           [0, dt]])
-         
-        self.sigma=(fx)@self.sigma@(fx.T)+F.T@(fu)@self.R@(fu.T)@F
-        
-        
-        #print((fu)@self.R@(fu.T))
-        
-        # self.t+=dt
-        # x,_=np.linalg.eig(self.sigma)
-        # plt.plot(self.t, x[0],'.', color=(1,0,0))
-        # plt.plot(self.t, x[1],'.', color=(1,0,0))
-        # plt.plot(self.t, x[2],'.', color=(1,0,0))
 
-        # print(x)
-
-    def estimate(self,dt,feature):
-        if len(feature)>0:
-            for z in feature:
-                if self.robot.world.obstacles[int(z[2])].is_feature:
-                    if not str(z[2]) in self.feature.keys():
-                        loc=np.asarray([self.mu[0]+z[0]*np.cos(z[1]+self.mu[2]),
-                                       self.mu[1]+z[0]*np.sin(z[1]+self.mu[2])])
-                        self.feature[str(z[2])]=self.mu.shape[0]
-                        self.mu=np.hstack((copy.deepcopy(self.mu), loc))
-                        sigma_new=np.diag(np.ones(self.sigma.shape[0]+2)*9999)
-                        sigma_new[0:self.sigma.shape[0], 0:self.sigma.shape[0]]=copy.deepcopy(self.sigma)
-                        self.sigma=sigma_new
-            KH=np.eye(self.mu.shape[0])    
-            mu=copy.deepcopy(self.mu)
-            test=0
-            for z in feature:    
-         #       plt.plot(self.robot.world.t, self.mu[0]+z[0]*np.cos(z[1]+self.mu[2]),'.', color=(1,0,0))
-          #      plt.plot(self.robot.world.t, self.mu[1]+z[0]*np.sin(z[1]+self.mu[2]),'.', color=(0,0,1))
-                if self.robot.world.obstacles[int(z[2])].is_feature:
-                    idx=self.feature[str(z[2])]
-                    loc=mu[idx:idx+2]
-                    dx=loc-mu[0:2]
-                    q=(dx@dx)
-                    r=np.sqrt(q)
-                    z_bar=np.asarray([r,
-                                      angle_wrapping(np.arctan2(dx[1],dx[0])-mu[2])])
-                    F=np.zeros((5,mu.shape[0]))
-                    F[0:3,0:3]=np.eye(3)
-                    F[3, idx]=1
-                    F[4, idx+1]=1
-
-                    H=(np.asarray([[-dx[0]/r, -dx[1]/r, 0,dx[0]/r, dx[1]/r],
-                                  [dx[1]/q, -dx[0]/q, -1, -dx[1]/q, dx[0]/q]]))@F
-                    
-                    print(np.linalg.det(H@self.sigma@(H.T)+self.Q))
-                    K=self.sigma@(H.T)@np.linalg.inv((H@self.sigma@(H.T)+self.Q))
-                    KH+=-K@H
-                    
-                    dz=z[0:2]-z_bar
-                    dz[1]=angle_wrapping(dz[1])
-                    self.mu+=K@(dz)
-                    test+=K@(dz)
-                    self.mu[2]=angle_wrapping(self.mu[2])
-
-                
-     #       plt.plot(self.robot.world.t, self.mu[3],'.', color=(0.5,0,0))
-     #       plt.plot(self.robot.world.t, self.mu[4],'.', color=(0,0,0.5))
-         #   if len(feature)>1:
-            #    plt.plot(self.robot.world.t, self.mu[5],'.', color=(0.5,0,0))
-           #     plt.plot(self.robot.world.t, self.mu[6],'.', color=(0,0,0.5))
-            self.sigma=(KH)@(self.sigma)
-        
-              #  print(self.mu)
-    def update(self,dt,z, u):
-        self.predict(dt, u)
-     #   self.mu[0:3]=self.robot.x[0:3]
-        self.estimate(dt,z)
-        error=self.mu[0:3]-self.robot.x[0:3]
-       #plt.plot(t, np.linalg.norm(error),'.', color=(1,0,0))
-     #   plt.plot(t, self.mu[2],'.', color=(1,0,0))
-        return self.mu, self.sigma
-    
     
 class Robot:
-    def __init__(self, world, input_noise):
+    def __init__(self, input_noise, slam_method="EKF_SLAM"):
         self.camera=Camera(self, 87*np.pi/180, 2, 0.1,0.1)
         self.x=np.zeros(6)
         self.x[2]=np.pi/2
         self.radius=0.3
-        self.world=world
         self.u=np.zeros(2)
         self.feature=[]
         self.input_noise=input_noise
+        measurement_noise=[self.camera.range_noise, self.camera.bearing_noise]
         self.x_est=[[0,0]]
-        self.odom=copy.deepcopy(self.x[0:3])
-        self.slam=EKF_SLAM(self)
+        self.odom=deepcopy(self.x[0:3])
+        if slam_method=="EKF_SLAM":
+            self.slam=EKF_SLAM(deepcopy(self.x[0:3]),np.diag(input_noise)**2, np.diag(measurement_noise)**2)
+        else:
+            self.slam=Graph_SLAM(deepcopy(self.x[0:3]),np.diag(input_noise)**2, np.diag(measurement_noise)**2,STM_length=3)
         self.covariance=np.zeros(6)
         self.camera_rate=0.03
 
@@ -278,29 +190,21 @@ class Robot:
         self.u=np.zeros(2)
 
     def input_eval(self):
-#        trans=np.random.normal(self.u[0], self.input_noise[0])
-    #    rot=np.random.normal(self.u[1], self.input_noise[1])
-        trans=copy.deepcopy(self.u[0])
-        rot=copy.deepcopy(self.u[1])
+        trans=np.random.normal(self.u[0], self.input_noise[0])
+        rot=np.random.normal(self.u[1], self.input_noise[1])
         if rot>=0.01:
             self.x[3]=1/dt*(-trans/rot*np.sin(self.x[2])+trans/rot*np.sin(self.x[2]+rot*dt))
             self.x[4]=1/dt*(trans/rot*np.cos(self.x[2])-trans/rot*np.cos(self.x[2]+rot*dt))
         else:
-            self.x[3]=trans*np.cos(self.x[2])
-            self.x[4]=trans*np.sin(self.x[2])
+            self.x[3]=trans*np.cos(self.x[2]+1/2*self.world.dt*rot)
+            self.x[4]=trans*np.sin(self.x[2]+1/2*self.world.dt*rot)
         
         self.x[5]=rot
         
     def observation(self, dt):
         obs=self.camera.measure()
-        #self.feature=[[self.x[0]+z[0]*np.cos(z[1]+self.x[2]),self.x[1]+z[0]*np.sin(z[1]+self.x[2])] for z in obs]
-        
-
-        # self.odom+=np.asarray([dt*self.u[0]*np.cos(self.odom[2]),
-        #                        dt*self.u[0]*np.sin(self.odom[2]),
-        #                        dt*self.u[1]])
-        
-        # self.odom[2]=angle_wrapping(self.odom[2])
+        for i,z in enumerate(obs):
+            z.append(self.world.obstacles[int(z[2])].is_feature)
         return obs
     
     def step(self, dt):
@@ -315,81 +219,16 @@ class Robot:
 
         self.x[0]=np.clip(x[0], self.world.bound[0,0],self.world.bound[0,1])
         self.x[1]=np.clip(x[1], self.world.bound[1,0],self.world.bound[1,1])
-        self.odom, self.covariance=self.slam.update(dt,z,copy.deepcopy(self.u))
-        # self.feature=[[self.odom[2*i+3],self.odom[2*i+4] ] for i in range(int((len(self.odom[3:]))/2))]
-# class Graph_slam:
-#     def __init__(self, x_init, max_iter):
-#         self.x=[x_init]
-#         self.max_iter=max_iter
-    
-#     def calc_edge(x1, y1, yaw1, x2, y2, yaw2, d1,
-#                   angle1, d2, angle2, t1, t2):
-#         edge = {}
+        self.odom, self.covariance=self.slam.update(dt,z,deepcopy(self.u))
+        
 
-#         tangle1 = angle_wrapping(yaw1 + angle1)
-#         tangle2 = angle_wrapping(yaw2 + angle2)
-#         tmp1 = d1 * np.cos(tangle1)
-#         tmp2 = d2 * np.cos(tangle2)
-#         tmp3 = d1 * np.sin(tangle1)
-#         tmp4 = d2 * np.sin(tangle2)
-
-#         edge.e[0, 0] = x2 - x1 - tmp1 + tmp2
-#         edge.e[1, 0] = y2 - y1 - tmp3 + tmp4
-#         edge.e[2, 0] = 0
-
-#         Rt1 = rotational_matrix(tangle1)
-#         Rt2 = rotational_matrix(tangle2)
-
-#         sig1 = cal_observation_sigma()
-#         sig2 = cal_observation_sigma()
-
-#         edge.omega = np.linalg.inv(Rt1 @ sig1 @ Rt1.T + Rt2 @ sig2 @ Rt2.T)
-
-#         edge.d1, edge.d2 = d1, d2
-#         edge.yaw1, edge.yaw2 = yaw1, yaw2
-#         edge.angle1, edge.angle2 = angle1, angle2
-#         edge.id1, edge.id2 = t1, t2
-
-#         return edge
-    
-#     def optimize(self, x_init, hz):
-#         print("start graph based slam")
-
-#         z_list = copy.deepcopy(hz)
-
-#         x_opt = copy.deepcopy(x_init)
-#         nt = x_opt.shape[1]
-#         n = nt * x_init.shape[1]
-
-#         for itr in range(self.max_iter):
-#             edges = self.calc_edges(x_opt, z_list)
-
-#             H = np.zeros((n, n))
-#             b = np.zeros((n, 1))
-
-#             for edge in edges:
-#                 H, b = fill_H_and_b(H, b, edge)
-
-#             # to fix origin
-#             H[0:STATE_SIZE, 0:STATE_SIZE] += np.identity(STATE_SIZE)
-
-#             dx = - np.linalg.inv(H) @ b
-
-#             for i in range(nt):
-#                 x_opt[0:3, i] += dx[i * 3:i * 3 + 3, 0]
-
-#             diff = dx.T @ dx
-#             print("iteration: %d, diff: %f" % (itr + 1, diff))
-#             if diff < 1.0e-5:
-#                 break
-
-#         return x_opt
-
+#%%
 map_img = cv2.flip(cv2.imread("map.png"),0)
 map_resolution=0.12 #meter/pixel
 origin=[0.6,0.6]
 
-world=World(map_img, origin, map_resolution)
+robots=[Robot([0.05,0.1], slam_method="Graph_SLAM")]
+world=World(map_img, origin, map_resolution, robots)
 dt=0.01
 #%%
 loop=True
