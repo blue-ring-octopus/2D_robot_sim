@@ -12,27 +12,49 @@ plt.figure()
 def angle_wrapping(theta):
     return deepcopy(np.arctan2(np.sin(theta), np.cos(theta)))
 
-def visualize(world,plot_resolution):
-    def draw_robot(image, world, pose, radius, color, alpha):
-        start_point=(int((pose[0]+world.origin[0])*plot_resolution),int((pose[1]+world.origin[1])*plot_resolution))
+class Visualizer:
+    def __init__(self,world, plot_resolution):
+        self.world=world
+        self.plot_resolution=plot_resolution
+        bkg_map=deepcopy(world.bkg_map)
+        w=int(bkg_map.shape[0]*self.plot_resolution*world.map_resolution)
+        h=int(bkg_map.shape[1]*self.plot_resolution*world.map_resolution)
+        bkg_map= cv2.resize(bkg_map, (w,h), interpolation=cv2.INTER_NEAREST)
+        
+        for obstacle in world.obstacles:
+            if obstacle.is_feature:
+                bkg_map=self.draw_features(bkg_map, obstacle.loc)
+        self.bkg_map= bkg_map
+    
+  
+    def state_to_pixel(self, state):
+         return (int((state[0]+self.world.origin[0])*self.plot_resolution),int((state[1]+self.world.origin[1])*self.plot_resolution))
+    
+    def draw_features(self, image, loc):
+         image=cv2.circle(image, self.state_to_pixel(loc) , int(0.05*self.plot_resolution),(0,0,255), -1)
+         return image
+         
+     
+    def draw_robot(self,image, world, pose, radius, color, alpha):
+        start_point=self.state_to_pixel(pose)
         end_point=(int(start_point[0]+40*np.cos(pose[2])), int(start_point[1]+40*np.sin(pose[2])))
         image = cv2.arrowedLine(image, start_point, end_point,
                                          (0, 0, 0), 2)
         tem = deepcopy(image)
-        tem= cv2.circle(tem, start_point, int(radius*plot_resolution),color, -1)
+        tem= cv2.circle(tem, start_point, int(radius*self.plot_resolution),color, -1)
         image=cv2.addWeighted(image, 1-alpha, tem, alpha, 0)
         return image
     
-    def draw_uncertainty(image, loc, covariance):
-        loc=(loc+world.origin[0])*plot_resolution
+    def draw_uncertainty(self, image, loc, covariance):
+        loc=self.state_to_pixel(loc)
         u, s, vh =np.linalg.svd(covariance)
         angle=np.arctan2(u[0,1], u[0,0])
-        axes=np.sqrt(s)*plot_resolution
-        image = cv2.ellipse(img=image, center=(int(loc[0]), int(loc[1])) ,axes=(int(axes[0]),int(axes[1])) ,
+        axes=np.sqrt(s)*self.plot_resolution
+        image = cv2.ellipse(img=image, center=loc ,axes=(int(axes[0]),int(axes[1])) ,
            angle=angle*180/np.pi, startAngle=0, endAngle=360, color=(255,255,0), thickness=2)
         return image 
     
-    def draw_graph(image, graph):
+    def draw_graph(self, image, graph):
         if len(graph.edges):
             thickness=[np.log(np.linalg.det(edge.omega)+1) for edge in graph.edges]
             thickness_range=np.max(thickness)-np.min(thickness)
@@ -40,44 +62,50 @@ def visualize(world,plot_resolution):
             thickness=thickness+1-np.min(thickness)
             thickness=np.clip(thickness, 1,5)
         for i,edge in enumerate(graph.edges):
-            start_point=(edge.node1.x[0:2]+world.origin)*plot_resolution
-            end_point=(edge.node2.x[0:2]+world.origin)*plot_resolution
-            print(thickness[i])
+            start_point=self.state_to_pixel(edge.node1.x[0:2])
+            end_point=self.state_to_pixel(edge.node2.x[0:2])
             if edge.type=="odom":
                 color=(255, 0, 0)
+                image=cv2.line(image, start_point, end_point,color, int((thickness[i])))
+
             elif edge.type=="measurement":
                 color=(0, 255, 255)    
             else:
                 color=(0, 0, 255)    
-            image=cv2.line(image, (int(start_point[0]),int(start_point[1]) ), (int(end_point[0]),int(end_point[1]) ),color, int((thickness[i])))
-            
+                image=cv2.line(image, start_point, end_point,color, int((thickness[i])))
+
         for node in graph.nodes:
-            x=(node.x[0:2]+world.origin)*plot_resolution
+            x=self.state_to_pixel(node.x[0:2])
             if node.type=="pose":
                 color=(0,0,255)
             else:
                 color=(0,255,255)
-            image=cv2.circle(image, (int(x[0]),int(x[1])) , int(0.05*plot_resolution),color, 2)
+            image=cv2.circle(image, x , int(0.05*self.plot_resolution),color, 2)
+        return image
+    def draw_map(self, image):
+        for point in self.world.robots[0].map:
+            loc=self.state_to_pixel(point)
+            image=cv2.circle(image, loc , 1 ,(175,175,175), -11)
         return image
     
-    image=deepcopy(world.bkg_map)
-    w=int(image.shape[0]*plot_resolution*world.map_resolution)
-    h=int(image.shape[1]*plot_resolution*world.map_resolution)
-    image= cv2.resize(image, (w,h), interpolation=cv2.INTER_NEAREST)
-    if world.robot.slam.__class__.__name__=="Graph_SLAM":
-        image=draw_graph(image, world.robot.slam.front_end)
-
-    image=draw_robot(image,world, world.robot.x, world.robot.radius,  (131,46,75), 0.1)
-    image=draw_robot(image,world, world.robot.odom, world.robot.radius, (131,46,75), 1)
+    def visualize(self):
+        world=self.world
+        image=deepcopy(self.bkg_map)
+        if world.robots[0].slam.__class__.__name__=="Graph_SLAM":
+            image=self.draw_graph(image, world.robots[0].slam.front_end)
     
-    if world.robot.slam.__class__.__name__=="EKF_SLAM":
-        image=draw_uncertainty(image, world.robot.odom[0:2], world.robot.covariance[0:2, 0:2] )
-        for i in range(int((len(world.robot.odom)-3)/2)):
-            loc=(world.robot.odom[2*i+3:2*i+5]+np.asarray(world.origin))*plot_resolution
-            image= cv2.circle(image, (int(loc[0]),int(loc[1])), 2, (0,0,255), -1)
-            image=draw_uncertainty(image, world.robot.odom[2*i+3:2*i+5], world.robot.covariance[2*i+3:2*i+5, 2*i+3:2*i+5])
-        
-    cv2.imshow('test', cv2.flip(image, 0))
+        image=self.draw_robot(image,world, world.robots[0].x, world.robots[0].radius,  (131,46,75), 0.1)
+        image=self.draw_robot(image,world, world.robots[0].odom, world.robots[0].radius, (131,46,75), 1)
+        image=self.draw_uncertainty(image, world.robots[0].odom[0:2], world.robots[0].covariance[0:2, 0:2] )
+
+        if world.robots[0].slam.__class__.__name__=="EKF_SLAM":
+            image=self.draw_uncertainty(image, world.robots[0].odom[0:2], world.robots[0].covariance[0:2, 0:2] )
+            for i in range(int((len(world.robots[0].odom)-3)/2)):
+                loc=(world.robots[0].odom[2*i+3:2*i+5]+np.asarray(world.origin))*self.plot_resolution
+                image= cv2.circle(image, (int(loc[0]),int(loc[1])), 2, (0,0,255), -1)
+                image=self.draw_uncertainty(image, world.robots[0].odom[2*i+3:2*i+5], world.robots[0].covariance[2*i+3:2*i+5, 2*i+3:2*i+5])
+        image=self.draw_map(image)
+        cv2.imshow('test', cv2.flip(image, 0))
 
 
 
@@ -87,9 +115,9 @@ def read_input(robot):
     if keyboard.is_pressed("x"):
         robot.tele_inputs(np.asarray([-0.05,0]))
     if keyboard.is_pressed("a"):
-        robot.tele_inputs(np.asarray([0,0.05]))
+        robot.tele_inputs(np.asarray([0,0.1]))
     if keyboard.is_pressed("d"):
-        robot.tele_inputs(np.asarray([0,-0.05]))
+        robot.tele_inputs(np.asarray([0,-0.1]))
     if keyboard.is_pressed("s"):
         robot.stop()
 def rotational_matrix(theta):
@@ -112,26 +140,30 @@ class World:
         for i, idx in enumerate(obs_loc[0]):
             obst_loc.append(np.asarray(([(obs_loc[1][i]+0.5)*map_resolution-origin[0],(obs_loc[0][i]+0.5)*map_resolution-origin[1]])))
             self.obstacles.append(Obstacle(obst_loc[-1], obs_id=i, is_feature=(np.random.uniform(0,1)<0.2)))
-        self.robot=agents[0]
-        self.robot.world=self
+        self.robots=agents
+        for robot in self.robots:
+            robot.world=self
         self.obstacles_tree=KDTree(obst_loc)
-        
-    def collision_check(self):
-        dists, idx=self.obstacles_tree.query(self.robot.x[0:2],5)
-        for i,dist in enumerate(dists):
-            if dist<=(self.robot.radius+self.map_resolution*0.5):
-                print("colision")
-                if not dist==0:
-                    collision=1/dist*np.asarray([self.obstacles[idx[i]].loc[0]-self.robot.x[0], self.obstacles[idx[i]].loc[1]-self.robot.x[1]])
-                    if np.dot(self.robot.x[3:5], collision)>=0:                        
-                        self.robot.x[3:5]=self.robot.x[3:5]-np.dot(self.robot.x[3:5], collision)*collision
 
-       # print(dist)
+    def collision_check(self):
+        for robot in self.robots:
+            dists, idx=self.obstacles_tree.query(robot.x[0:2],5)
+            for i,dist in enumerate(dists):
+                if dist<=(robot.radius+self.map_resolution*0.5):
+                    print("colision")
+                    if not dist==0:
+                        collision=1/dist*np.asarray([self.obstacles[idx[i]].loc[0]-robot.x[0], self.obstacles[idx[i]].loc[1]-robot.x[1]])
+                        if np.dot(robot.x[3:5], collision)>=0:                        
+                            robot.x[3:5]=robot.x[3:5]-np.dot(robot.x[3:5], collision)*collision
+
     def step(self, dt):
         self.dt=dt
-        self.robot.input_eval()
+        for robot in self.robots:
+            robot.input_eval(dt)
         self.collision_check()
-        self.robot.step(dt)
+        for robot in self.robots:
+            robot.state_transition(dt)
+            robot.process(dt)
         self.t+=dt
 
 class Obstacle:
@@ -162,7 +194,7 @@ class Camera:
 
     
 class Robot:
-    def __init__(self, input_noise, slam_method="EKF_SLAM"):
+    def __init__(self, input_noise,process_interval, slam_method="EKF_SLAM"):
         self.camera=Camera(self, 87*np.pi/180, 2, 0.1,0.1)
         self.x=np.zeros(6)
         self.x[2]=np.pi/2
@@ -177,9 +209,12 @@ class Robot:
             self.slam=EKF_SLAM(deepcopy(self.x[0:3]),np.diag(input_noise)**2, np.diag(measurement_noise)**2)
         else:
             self.slam=Graph_SLAM(deepcopy(self.x[0:3]),np.diag(input_noise)**2, np.diag(measurement_noise)**2,STM_length=3)
-        self.covariance=np.zeros(6)
+        self.covariance=np.zeros((3,3))
         self.camera_rate=0.03
-
+        self.step_count=0
+        self.process_interval=process_interval
+        self.map=[]
+        
     def tele_inputs(self, u):
         self.u[0]+=u[0]
         self.u[1]+=u[1]
@@ -189,7 +224,7 @@ class Robot:
     def stop(self):
         self.u=np.zeros(2)
 
-    def input_eval(self):
+    def input_eval(self,dt):
         trans=np.random.normal(self.u[0], self.input_noise[0])
         rot=np.random.normal(self.u[1], self.input_noise[1])
         if rot>=0.01:
@@ -207,8 +242,7 @@ class Robot:
             z.append(self.world.obstacles[int(z[2])].is_feature)
         return obs
     
-    def step(self, dt):
-        z=self.observation(dt)
+    def state_transition(self,dt):
         x=self.x
         dx=np.asarray([dt*x[3],
                        dt*x[4],
@@ -219,30 +253,40 @@ class Robot:
 
         self.x[0]=np.clip(x[0], self.world.bound[0,0],self.world.bound[0,1])
         self.x[1]=np.clip(x[1], self.world.bound[1,0],self.world.bound[1,1])
-        self.odom, self.covariance=self.slam.update(dt,z,deepcopy(self.u))
         
+    def process(self, dt):
+        if self.step_count >= self.process_interval:
+            read_input(self)
+            z=self.observation(self.process_interval*dt)
+            self.odom, self.covariance, self.map=self.slam.update(self.process_interval*dt,z,deepcopy(self.u))
+          
+            self.step_count=0
+        self.step_count+=1
+
 
 #%%
 map_img = cv2.flip(cv2.imread("map.png"),0)
 map_resolution=0.12 #meter/pixel
 origin=[0.6,0.6]
 
-robots=[Robot([0.05,0.1], slam_method="Graph_SLAM")]
+world_dt=0.01
+process_interval=3
+
+robots=[Robot([0.05,0.1], process_interval ,slam_method="Graph_SLAM")]
 world=World(map_img, origin, map_resolution, robots)
-dt=0.01
+vis=Visualizer(world,plot_resolution=100)
 #%%
 loop=True
 while loop:  # making a loop
   #  try:
-        read_input(world.robot)
-        world.step(dt)
-        print("trans ", world.robot.u[0], "rot ", world.robot.u[1])
-        visualize(world,plot_resolution=100) #pixel per meter
+        world.step(world_dt)
+        print("trans ", world.robots[0].u[0], "rot ", world.robots[0].u[1])
+        vis.visualize() #pixel per meter
         if keyboard.is_pressed("esc"):  # if key 'q' is pressed 
              print('exit')
              loop=False 
         cv2.waitKey(1)
-        time.sleep(dt)
+        time.sleep(world_dt)
         
 
   #  except Exception as e:

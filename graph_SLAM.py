@@ -28,6 +28,7 @@ class Graph_SLAM:
                 self.id=node_id
                 self.children={}
                 self.parents={}
+                self.local_map=[]
                 
         class Edge:
             def __init__(self, node1, node2, Z, omega, edge_type):
@@ -48,7 +49,7 @@ class Graph_SLAM:
             self.edges=[]
             self.feature_nodes={}
         
-        def add_node(self, x, node_type, feature_id=None):
+        def add_node(self, x, node_type, feature_id=None, ):
             i=len(self.nodes)
             self.nodes.append(self.Node(i,x, node_type))
             if feature_id:
@@ -101,7 +102,6 @@ class Graph_SLAM:
             idx_map={}
             x=np.zeros(3*len(graph.nodes))
             for i,node in enumerate(graph.nodes):
-                print(node.x)
                 x[3*i:3*i+3]=node.x
                 idx_map[str(node.id)]=3*i
             return x, idx_map
@@ -129,18 +129,22 @@ class Graph_SLAM:
                 dx=self.linear_solve(H,-b)
                 x+=dx
             self.update_nodes(graph, x, idx_map)
+            return x, H
             
     def __init__(self,x_init, input_noise, measurement_noise, STM_length):
         self.front_end=self.Front_end()
         self.back_end=self.Back_end()
         self.x=deepcopy(x_init)
-        self.current_node_id=self.front_end.add_node(self.x, "pose")
+        self.sigma=np.zeros((3,3))
+        self.current_node_id=self.front_end.add_node(self.x, "pose",[])
         self.R=input_noise
         self.Q=measurement_noise
         self.EKF_SLAM=EKF_SLAM(np.zeros(3),input_noise, measurement_noise)
         self.node_buffer_size=STM_length
         self.node_buffer=[0 for _ in range(STM_length)]
-        self.loop_closure_thres=3
+        self.loop_closure_thres=5
+        self.local_map=[]
+        self.global_map=[]
         
     def loop_closure(self, target, matching_features):
         print("loop close")
@@ -164,7 +168,8 @@ class Graph_SLAM:
         Z=np.vstack((Z,[0,0,1]))
         omega=np.eye(3)*0.001
         self.front_end.add_edge(deepcopy(self.current_node_id),target.id, Z, omega, edge_type="loop_closure")
-        self.back_end.optimize(self.front_end)
+        x, H=self.back_end.optimize(self.front_end)
+        self.sigma=H[0:3,0:3]
         
     def loop_closure_detection(self):
         self_children=self.front_end.nodes[self.current_node_id].children
@@ -177,7 +182,7 @@ class Graph_SLAM:
                     matches=[feature for feature in feature_node_id if feature in features_id]
                     if len(matches)>=self.loop_closure_thres:
                         self.loop_closure(node, matches)
-        
+                        
     def posterior_to_graph(self, mu, sigma,node_to_origin):
         features=deepcopy(self.EKF_SLAM.feature)
         for feature_id in features:
@@ -195,27 +200,37 @@ class Graph_SLAM:
         
             self.front_end.add_edge(deepcopy(self.current_node_id),feature_node_id, Z,omega , edge_type="measurement")
         
-        self.loop_closure_detection()
-        
-        
-        Z=np.linalg.inv(node_to_origin)@v2t(self.x)
+
+    def global_map_assemble(self):
+        self.global_map=[(v2t(node.x)@np.hstack((deepcopy(point),1)))[0:2]  for node in self.front_end.nodes for point in node.local_map ]
+        if len(self.global_map)>1000:
+            idx=np.random.choice(range(len(self.global_map)), 1000, replace=False)
+            self.global_map=[self.global_map[i] for i in idx]
+            
+    def create_new_node(self, sigma, Z):
+        self.front_end.nodes[self.current_node_id].local_map=deepcopy(self.local_map)
+        self.local_map=[]
         new_node_id=self.front_end.add_node(self.x,"pose")
         omega=np.linalg.inv(sigma[0:3, 0:3]+np.eye(3)*0.001)
         self.front_end.add_edge(deepcopy(self.current_node_id),new_node_id, Z, omega)
         self.node_buffer.append(deepcopy(self.current_node_id))
         self.node_buffer=self.node_buffer[-self.node_buffer_size:]
-        self.current_node_id=new_node_id
+        self.current_node_id=new_node_id      
         
-
-    def update(self, dt, z, u):
+    def update(self, dt, z, u): 
+        x, sigma, _=self.EKF_SLAM.update(dt,z,u)
         node_x=deepcopy(self.front_end.nodes[self.current_node_id].x)
         node_to_origin=v2t(node_x)
-        x, sigma=self.EKF_SLAM.update(dt,z,u)
         T=v2t(x[0:3])
-
         self.x=t2v(node_to_origin@T)
+        self.local_map+=([[x[0]+obs[0]*np.cos(x[2]+obs[1]), x[1]+obs[0]*np.sin(x[2]+obs[1])] for obs in z])
         if np.linalg.norm(self.x[0:2]-node_x[0:2])>=1:
             self.posterior_to_graph(x, sigma, node_to_origin)
+            self.loop_closure_detection()
+            node_x=deepcopy(self.front_end.nodes[self.current_node_id].x)
+            node_to_origin=v2t(node_x)
+            self.x=t2v(node_to_origin@v2t(x[0:3]))
+            self.create_new_node(sigma, T)
+            self.global_map_assemble()
             self.EKF_SLAM=EKF_SLAM(np.zeros(3),deepcopy(self.R), deepcopy(self.Q))
-
-        return self.x, np.zeros((3,3))
+        return deepcopy(self.x), deepcopy(self.sigma), deepcopy(self.global_map)

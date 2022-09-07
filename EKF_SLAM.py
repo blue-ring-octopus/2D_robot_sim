@@ -98,5 +98,5 @@ class EKF_SLAM:
     def update(self,dt,z, u):
         self.predict(dt, u)
         self.estimate(dt,z)
-        return self.mu, self.sigma
+        return self.mu, self.sigma, []
     
