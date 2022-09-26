@@ -203,8 +203,8 @@ class Graph_SLAM:
 
     def global_map_assemble(self):
         self.global_map=[(v2t(node.x)@np.hstack((deepcopy(point),1)))[0:2]  for node in self.front_end.nodes for point in node.local_map ]
-        if len(self.global_map)>1000:
-            idx=np.random.choice(range(len(self.global_map)), 1000, replace=False)
+        if len(self.global_map)>5000:
+            idx=np.random.choice(range(len(self.global_map)), 5000, replace=False)
             self.global_map=[self.global_map[i] for i in idx]
             
     def create_new_node(self, sigma, Z):
