@@ -46,33 +46,33 @@ class Camera:
 
     
 class Robot:
-    def __init__(self, input_noise,process_interval, slam_method="EKF_SLAM"):
+    def __init__(self, input_noise,process_interval,  slam_method="EKF_SLAM"):
         self.camera=Camera(self, 87*np.pi/180, 2, 0.1,0.1)
+        self.input_noise=input_noise
+        self.measurement_noise=[self.camera.range_noise, self.camera.bearing_noise]
+        self.slam_method=slam_method
+        self.camera_rate=0.03
+        self.process_interval=process_interval
+        
+        self.reset()
+
+    def reset(self):
         self.x=np.zeros(6)
         self.x[2]=np.pi/2
         self.radius=0.3
         self.u=np.zeros(2)
         self.feature=[]
-        self.input_noise=input_noise
-        measurement_noise=[self.camera.range_noise, self.camera.bearing_noise]
         self.x_est=[[0,0]]
         self.odom=deepcopy(self.x[0:3])
-        if slam_method=="EKF_SLAM":
-            self.slam=EKF_SLAM(deepcopy(self.x[0:3]),np.diag(input_noise)**2, np.diag(measurement_noise)**2)
-        else:
-            self.slam=Graph_SLAM(deepcopy(self.x[0:3]),np.diag(input_noise)**2, np.diag(measurement_noise)**2,STM_length=3)
         self.covariance=np.zeros((3,3))
-        self.camera_rate=0.03
-        self.step_count=0
-        self.process_interval=process_interval
         self.map=[]
+        self.step_count=0
+        if self.slam_method=="EKF_SLAM":
+            self.slam=EKF_SLAM(deepcopy(self.x[0:3]),np.diag(self.input_noise)**2, np.diag(self.measurement_noise)**2)
+        else:
+            self.slam=Graph_SLAM(deepcopy(self.x[0:3]),np.diag(self.input_noise)**2, np.diag(self.measurement_noise)**2,STM_length=3)
         
-    def tele_inputs(self, u):
-        self.u[0]+=u[0]
-        self.u[1]+=u[1]
-        self.u[0]=np.clip(self.u[0], -1,1)
-        self.u[1]=np.clip(self.u[1], -1,1)
-
+        
     def stop(self):
         self.u=np.zeros(2)
 
@@ -107,10 +107,13 @@ class Robot:
         self.x[1]=np.clip(x[1], self.world.bound[1,0],self.world.bound[1,1])
         
     def process(self, dt):
+        processed=False
         if self.step_count >= self.process_interval:
-            read_input(self)
+            processed=True
+            self.controller.input_()
             z=self.observation(self.process_interval*dt)
             self.odom, self.covariance, self.map=self.slam.update(self.process_interval*dt,z,deepcopy(self.u))
-          
+            # print(self.covariance)
             self.step_count=0
         self.step_count+=1
+        return processed

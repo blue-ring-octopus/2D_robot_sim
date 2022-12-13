@@ -8,6 +8,8 @@ import numpy as np
 from copy import deepcopy
 from EKF_SLAM import EKF_SLAM
 from scipy.linalg import solve_triangular
+import open3d as o3d 
+from scipy.spatial import KDTree
 
 def v2t(v):  
     t=np.asarray([[np.cos(v[2]), -np.sin(v[2]), v[0]],
@@ -25,6 +27,7 @@ class Graph_SLAM:
             def __init__(self, node_id, x, node_type):
                 self.type=node_type
                 self.x=deepcopy(x)
+                self.H=np.eye(3)*0.001
                 self.id=node_id
                 self.children={}
                 self.parents={}
@@ -46,14 +49,18 @@ class Graph_SLAM:
                 
         def __init__(self):
             self.nodes=[]
+            self.pose_nodes=[]
             self.edges=[]
             self.feature_nodes={}
         
         def add_node(self, x, node_type, feature_id=None, ):
             i=len(self.nodes)
-            self.nodes.append(self.Node(i,x, node_type))
+            node=self.Node(i,x, node_type)
+            self.nodes.append(node)
+            if node_type=="pose":
+                self.pose_nodes.append(node)
             if feature_id:
-                self.feature_nodes[feature_id]=self.nodes[i]
+                self.feature_nodes[feature_id]=node
             return i
         
         def add_edge(self, node_1_id, node_2_id, Z, omega, edge_type="odom"):
@@ -61,6 +68,9 @@ class Graph_SLAM:
         
         
     class Back_end:
+        def get_feature_jacobian(self):
+            pass
+        
         def get_jacobian(self, x1, x2, z):
             z=np.linalg.inv(z)
             J1=[[z[0,1]*np.sin(x1[2])-z[0,0]*np.cos(x1[2]),-z[0,1]*np.cos(x1[2])-z[0,0]*np.sin(x1[2]),z[0,1]*(x1[0]*np.cos(x1[2])+x1[1]*np.sin(x1[2]))-z[0,0]*(x1[1]*np.cos(x1[2])-x1[0]*np.sin(x1[2]))-x2[0]*(z[0,1]*np.cos(x1[2])+z[0,0]*np.sin(x1[2]))+x2[1]*(z[0,0]*np.cos(x1[2]) - z[0,1]*np.sin(x1[2]))],
@@ -72,6 +82,7 @@ class Graph_SLAM:
                 [-z[0,1]*np.cos(x1[2])-z[0,0]*np.sin(x1[2]),z[0,0]*np.cos(x1[2])-z[0,1]*np.sin(x1[2]),0],
                 [0,0,1]]
             return np.asarray(J1), np.asarray(J2)
+        
         def error_function(self, x1,x2,Z):
             return t2v(np.linalg.inv(Z)@(np.linalg.inv(v2t(x1))@v2t(x2)))
 
@@ -111,11 +122,13 @@ class Graph_SLAM:
             y=solve_triangular(L,b, lower=True)
             return solve_triangular(L.T, y)
         
-        def update_nodes(self, graph,x, idx_map):
+        def update_nodes(self, graph,x,H, idx_map):
             for node in graph.nodes:
                 idx=idx_map[str(node.id)]
                 nodex=x[idx:idx+3]
+                nodeH=H[idx:idx+3,idx:idx+3]
                 node.x=deepcopy(nodex)
+                node.H=deepcopy(nodeH)
             
         def optimize(self, graph):
             x, idx_map= self.node_to_vector(deepcopy(graph))
@@ -128,26 +141,32 @@ class Graph_SLAM:
                 H[0:3,0:3]+=np.eye(3)
                 dx=self.linear_solve(H,-b)
                 x+=dx
-            self.update_nodes(graph, x, idx_map)
+            self.update_nodes(graph, x,H, idx_map)
             return x, H
             
-    def __init__(self,x_init, input_noise, measurement_noise, STM_length):
-        self.front_end=self.Front_end()
-        self.back_end=self.Back_end()
+    def __init__(self,x_init, input_noise, measurement_noise, STM_length, loop_closure_thres=5):
         self.x=deepcopy(x_init)
-        self.sigma=np.zeros((3,3))
-        self.current_node_id=self.front_end.add_node(self.x, "pose",[])
         self.R=input_noise
         self.Q=measurement_noise
-        self.EKF_SLAM=EKF_SLAM(np.zeros(3),input_noise, measurement_noise)
         self.node_buffer_size=STM_length
-        self.node_buffer=[0 for _ in range(STM_length)]
-        self.loop_closure_thres=5
+        self.loop_closure_thres=loop_closure_thres
+        self.reset()
+
+    def reset(self):
+        self.front_end=self.Front_end()
+        self.back_end=self.Back_end()
+        self.current_node_id=self.front_end.add_node(self.x, "pose",[])
+        self.EKF_SLAM=EKF_SLAM(np.zeros(3),self.R, self.Q)
+        self.omega=np.eye(3)*0.001
+        self.node_buffer=[0 for _ in range(self.node_buffer_size)]
         self.local_map=[]
         self.global_map=[]
+        self.loop_closed=False
+
         
-    def loop_closure(self, target, matching_features):
+    def _loop_closure(self, target, matching_features):
         print("loop close")
+        self.loop_closed=True
         current_node=self.front_end.nodes[self.current_node_id]
         z1=[]
         z2=[]
@@ -169,7 +188,7 @@ class Graph_SLAM:
         omega=np.eye(3)*0.001
         self.front_end.add_edge(deepcopy(self.current_node_id),target.id, Z, omega, edge_type="loop_closure")
         x, H=self.back_end.optimize(self.front_end)
-        self.sigma=H[0:3,0:3]
+        self.omega=H
         
     def loop_closure_detection(self):
         self_children=self.front_end.nodes[self.current_node_id].children
@@ -181,9 +200,9 @@ class Graph_SLAM:
                     features_id=[node.children[key]["children"].id for key in node.children if node.children[key]["children"].type=="feature"]
                     matches=[feature for feature in feature_node_id if feature in features_id]
                     if len(matches)>=self.loop_closure_thres:
-                        self.loop_closure(node, matches)
+                        self._loop_closure(node, matches)
                         
-    def posterior_to_graph(self, mu, sigma,node_to_origin):
+    def _posterior_to_graph(self, mu, sigma,node_to_origin):
         features=deepcopy(self.EKF_SLAM.feature)
         for feature_id in features:
             idx=features[feature_id]
@@ -201,14 +220,21 @@ class Graph_SLAM:
             self.front_end.add_edge(deepcopy(self.current_node_id),feature_node_id, Z,omega , edge_type="measurement")
         
 
-    def global_map_assemble(self):
-        self.global_map=[(v2t(node.x)@np.hstack((deepcopy(point),1)))[0:2]  for node in self.front_end.nodes for point in node.local_map ]
-        if len(self.global_map)>5000:
-            idx=np.random.choice(range(len(self.global_map)), 5000, replace=False)
-            self.global_map=[self.global_map[i] for i in idx]
-            
-    def create_new_node(self, sigma, Z):
-        self.front_end.nodes[self.current_node_id].local_map=deepcopy(self.local_map)
+    def search_proximity_nodes(self, pose, radius):
+        nodes=[deepcopy(node) for node in self.front_end.pose_nodes if np.linalg.norm(t2v(np.linalg.inv(v2t(node.x))@v2t(pose)))<radius]
+        return nodes
+    
+    def search_proximity_features(self, pose, radius):
+        features=[deepcopy(self.front_end.feature_nodes[key]) for key in self.front_end.feature_nodes if np.linalg.norm(pose-self.front_end.feature_nodes[key].x)<radius]
+        return features
+    
+    def _create_new_node(self, sigma, Z):
+        # local_map=deepcopy(self.local_map)
+        # cloud=o3d.geometry.PointCloud()
+        # cloud.points=o3d.utility.Vector3dVector(np.concatenate((np.asarray(local_map), np.zeros(len(local_map)).reshape(-1,1)), axis=1))
+        # cloud, ind = cloud.remove_statistical_outlier(nb_neighbors=20,
+        #                                                 std_ratio=0.5)
+        # self.front_end.nodes[self.current_node_id].local_map=cloud
         self.local_map=[]
         new_node_id=self.front_end.add_node(self.x,"pose")
         omega=np.linalg.inv(sigma[0:3, 0:3]+np.eye(3)*0.001)
@@ -216,21 +242,44 @@ class Graph_SLAM:
         self.node_buffer.append(deepcopy(self.current_node_id))
         self.node_buffer=self.node_buffer[-self.node_buffer_size:]
         self.current_node_id=new_node_id      
+        _, H=self.back_end.optimize(self.front_end)
+        self.omega=H
+
+    def occupancy_map(self, pointcloud):
+        return 
+    
+    def global_map_assemble(self):
+        global_map=[(v2t(node.x)@np.hstack((deepcopy(point),1)))[0:2]  for node in self.front_end.nodes for point in node.local_map ]
+        # if len(self.global_map)>1000:
+        #     idx=np.random.choice(range(len(global_map)), 1000, replace=False)
+        #     self.global_map=[global_map[i] for i in idx]
+            
+        cloud=o3d.geometry.PointCloud()
+        cloud.points=o3d.utility.Vector3dVector(np.concatenate((np.asarray(global_map), np.zeros(len(global_map)).reshape(-1,1)), axis=1))
+        cloud, ind = cloud.remove_statistical_outlier(nb_neighbors=20,
+                                                        std_ratio=0.5)
         
+        cloud=cloud.voxel_down_sample(0.05) 
+        self.global_map=np.asarray(cloud.points)[:,0:2]
+        self.map_tree=KDTree(self.global_map)
+
     def update(self, dt, z, u): 
+        self.loop_closed=False
         x, sigma, _=self.EKF_SLAM.update(dt,z,u)
-        node_x=deepcopy(self.front_end.nodes[self.current_node_id].x)
+        node_x=self.front_end.nodes[self.current_node_id].x
         node_to_origin=v2t(node_x)
         T=v2t(x[0:3])
         self.x=t2v(node_to_origin@T)
-        self.local_map+=([[x[0]+obs[0]*np.cos(x[2]+obs[1]), x[1]+obs[0]*np.sin(x[2]+obs[1])] for obs in z])
-        if np.linalg.norm(self.x[0:2]-node_x[0:2])>=1:
-            self.posterior_to_graph(x, sigma, node_to_origin)
+       # self.local_map+=([[x[0]+obs[0]*np.cos(x[2]+obs[1]), x[1]+obs[0]*np.sin(x[2]+obs[1])] for obs in z])
+
+
+        if np.linalg.norm(t2v(np.linalg.inv(v2t(node_x))@v2t(self.x)))>=1:
+            self._posterior_to_graph(x, sigma, node_to_origin)
             self.loop_closure_detection()
             node_x=deepcopy(self.front_end.nodes[self.current_node_id].x)
             node_to_origin=v2t(node_x)
             self.x=t2v(node_to_origin@v2t(x[0:3]))
-            self.create_new_node(sigma, T)
-            self.global_map_assemble()
+            self._create_new_node(sigma, T)
+          #  self.global_map_assemble()
             self.EKF_SLAM=EKF_SLAM(np.zeros(3),deepcopy(self.R), deepcopy(self.Q))
-        return deepcopy(self.x), deepcopy(self.sigma), deepcopy(self.global_map)
+        return deepcopy(self.x), deepcopy(np.linalg.inv(self.front_end.nodes[self.current_node_id-1].H)), deepcopy(self.global_map)

@@ -8,32 +8,42 @@ from colorsys import hsv_to_rgb
 from Visualizer import Visualizer
 from World import World
 from scipy.spatial import KDTree
-
-#%%
+from keyboard_controller import Tele_Controller
+          
+    
 map_img = cv2.flip(cv2.imread("map_actual.png"),0)
 map_resolution=0.12 #meter/pixel
 origin=[0.6,0.6]
 
 world_dt=0.01
 process_interval=3
+robots=[Robot([0.05,0.1], process_interval,slam_method="Graph_SLAM")]
+tele_controller=Tele_Controller(robots[0])
+robots[0].controller=tele_controller
 
-robots=[Robot([0.05,0.1], process_interval ,slam_method="Graph_SLAM")]
-world=World(map_img, origin, map_resolution, robots)
+#robots=[Robot([0.05,0.1], process_interval ,slam_method="EKF_SLAM")]
+world=World(map_img, origin, map_resolution, robots, random_feature=False)
 vis=Visualizer(world,plot_resolution=100)
 #%%
 loop=True
+render=True
+max_node=100
 while loop:  
   #  try:
-        world.step(world_dt)
-        print("trans ", world.robots[0].u[0], "rot ", world.robots[0].u[1])
-        vis.visualize() 
+        collided, _ =world.step(world_dt)
+        loop=(not collided) and (len(robots[0].slam.front_end.pose_nodes)<max_node)
+        if render:
+            vis.visualize() 
+        if keyboard.is_pressed("r"): 
+            world.reset()
         if keyboard.is_pressed("esc"): 
              print('exit')
              loop=False 
+
         cv2.waitKey(1)
         time.sleep(world_dt)
-        
 
+        
   #  except Exception as e:
   #      print(e)
    #     cv2.destroyAllWindows()

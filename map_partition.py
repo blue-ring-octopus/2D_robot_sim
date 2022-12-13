@@ -14,6 +14,7 @@ from numba import cuda
 import networkx as nx
 import matplotlib.pyplot as plt
 import pickle
+from region_graph import RegionGraph
 
 def angle_wrapping(theta):
     return deepcopy(np.arctan2(np.sin(theta), np.cos(theta)))    
@@ -95,56 +96,119 @@ for i,x in enumerate(X):
                     for l,theta in enumerate(Theta):
                         region=check_visible([x,y], region,structures[k] , i,j,k,l, theta)
 
-#%% build graph
-class RegionGraph:
-    class Node:
-        def __init__(self, node_id,name,grid):
-            self.id=node_id
-            self.name=name
-            self.grid=grid
-            self.edges=[]
-    
-    class Edge:
-        def __init__(self, node1, node2, grid):
-            self.grid=grid
-            self.node1=node1
-            self.node2=node2
-            node1.edges.append(self)
-            node2.edges.append(self)
-    def __init__(self):
-        self.nodes=[]
-        self.edges=[]
-        
+#%% contiguous 
+def expand(region, initial, action):
+    next_states=[]
+    for a in action:
+        next_state=seed+a
+        i=np.round(next_state.copy()).astype(int)
+        if min(i)>=0 and (i<region.shape).all() and region[i[0], i[1], i[2]]==0.5:
+            next_states.append(next_state)
+    return next_states
 
-    def make_nodes(self, structures, regions):
-        for i,structure in enumerate(regions):
-            self.nodes.append(self.Node(i,"test",structure))
+def select_contiguous(region, seed, next_states, queue):
+    for state in next_states:
+        i=np.round(state.copy()).astype(int)
+        region[i[0], i[1], i[2]]=1
+        if seed in np.asarray(next_states):
+            if not id(state) in map(id, queue):
+                queue.append(state.copy())
+        else:
+            seed=state
+    return region, seed, queue
+
+
+action=[[1,0,0],[0,0,1],[-1,0,0],[0,0,-1], [0,1,0],[0,-1,0]]
+
+for i in range(region.shape[0]):
+    test=region[i,:,:,:]
+    reachable_region=test*0.5
+    seed=np.array(np.where(test==1)).T[0]
+    queue=[]
+    reachable_region[seed[0], seed[1], seed[2]]=1
+    
+    next_states=expand(reachable_region, seed, action)     
+    reachable_region, seed, queue=select_contiguous(reachable_region, seed, next_states, queue)
+    
+    while len(queue)>0:
+        seed_old=seed
+        next_states=expand(reachable_region, seed, action)                 
+        reachable_region, seed, queue=select_contiguous(reachable_region, seed, next_states, queue)
+    
+        if max(abs(seed_old-seed))<0.01:
+            seed=queue[0]
+            queue=queue[1:]
+            
+    # if np.where(reachable_region==0.5)[0]>10:
         
-    def make_edges(self):
-        for i,node1 in enumerate(self.nodes[0:-1]):
-            for node2 in self.nodes[i+1:]:
-                overlap=node1.grid*node2.grid
-                if np.sum(overlap):
-                    self.Edge(node1,node2, overlap)
-                    self.edges.append([node1.id, node2.id])
+    for j in range(reachable_region.shape[2]):
+        cv2.imshow("contiguous", cv2.resize(reachable_region[:,:,j], dsize=[500,500]))
+        cv2.waitKey(100) 
+    cv2.destroyAllWindows()
+
+#%% reachbility 
+test=region[0,:,:,:]
+reachable_region=test*0.5
+action=[[1,0,0],[0,0,1],[-1,0,0],[0,0,-1], [0,1,0],[0,-1,0]]
+seed=np.array(np.where(test==1)).T[0]
+queue=[]
+reachable_region[seed[0], seed[1], seed[2]]=1
+hist=[seed]
+next_states=[]
+for a in action:
+    next_state=seed+a
+    i=np.round(next_state.copy()).astype(int)
+    if not sum([np.linalg.norm(next_state-x)<0.1 for x in hist]) and min(i)>=0 and(i<reachable_region.shape).all() and reachable_region[i[0], i[1], i[2]]:
+        next_states.append(next_state)
+        hist.append(next_state)
         
-    def visualize(self):
-        G = nx.Graph()
-        G.add_edges_from(self.edges)
-        nx.draw_networkx(G)
-        plt.show()
-        
-    def get_region(self, x,y,theta):
-        regions=[]
-        for node in self.nodes:
-            if node.grid[x,y,theta]:
-                regions.append(node.id)
-        return regions
+for state in next_states:
+    i=np.round(state.copy()).astype(int)
+    reachable_region[i[0], i[1], i[2]]=1
+    if seed in np.asarray(next_states):
+        if not sum([np.linalg.norm(state-x)<0.1 for x in queue]):
+            queue.append(state.copy())
+    else:
+        seed=state
+        #%%
+j=0
+while len(queue)>0:
+    print(j)
+    seed_old=seed
+    next_states=[]
+    for a in action:
+        next_state=seed+a
+        i=np.round(next_state.copy()).astype(int)
+        if not sum([np.linalg.norm(next_state-x)<0.1 for x in hist]) and min(i)>=0 and(i<reachable_region.shape).all() and reachable_region[i[0], i[1], i[2]]:
+            next_states.append(next_state)
+
+            hist.append(next_state)
+            
+    for state in next_states:
+        i=np.round(state.copy()).astype(int)
+        reachable_region[i[0], i[1], i[2]]=1
+        if seed in np.asarray(next_states):
+            if not sum([np.linalg.norm(state-x)<0.1 for x in queue]):
+                queue.append(state.copy())
+        else:
+            seed=state
+                
+    if max(abs(seed_old-seed))<0.01:
+        seed=queue[0]
+        queue=queue[1:]
+    j+=1
+for i in range(reachable_region.shape[2]):
+    cv2.imshow("thing", cv2.resize(reachable_region[:,:,i], dsize=[500,500]))
+    cv2.waitKey(100) 
+cv2.destroyAllWindows()
+#%% build graph
+from region_graph import RegionGraph
+
     
     
 name=["pillar", "I beam 1","I beam 2", "wall" ]
 
-graph=RegionGraph()
+graph=RegionGraph([0.6,0.6], [0.12, 0.12, -2*np.pi/50])
 graph.make_nodes(structures, region)
 graph.make_edges()
 graph.visualize()
@@ -153,12 +217,12 @@ pickle.dump( graph, open( "regionGraph.p", "wb" ) )
 #%%
 points=[]
 colors=[]
-for i,x in enumerate(X):
-    for j, y in enumerate(Y):
+for i,x in enumerate(np.linspace(-0.6, 5.4, 50)):
+    for j, y in enumerate(np.linspace(-0.6, 5.4, 50)):
         for k,theta in enumerate(Theta):
-            regions=graph.get_region(i, j, k)
+            regions=graph.get_region(x, y, theta)
             if len(regions):
-                points.append([i,j,k])
+                points.append([x,y,theta])
                 color=[np.array(cs.hsv_to_rgb(region/len(graph.nodes), 1, 1))for region in regions]
                 colors.append((np.mean(color, axis=0)))
                     
@@ -166,10 +230,11 @@ for i,x in enumerate(X):
 pcd = o3d.geometry.PointCloud()
 pcd.points = o3d.utility.Vector3dVector(points)
 pcd.colors=o3d.utility.Vector3dVector(colors)
-o3d.visualization.draw_geometries([pcd])
-voxel_grid = o3d.geometry.VoxelGrid.create_from_point_cloud(pcd,
-                                                            voxel_size=1)
-o3d.visualization.draw_geometries([voxel_grid])
+frame=o3d.geometry.TriangleMesh.create_coordinate_frame()
+o3d.visualization.draw_geometries([pcd, frame])
+# voxel_grid = o3d.geometry.VoxelGrid.create_from_point_cloud(pcd,
+#                                                             voxel_size=0.12)
+# o3d.visualization.draw_geometries([voxel_grid])
 # tree=o3d.geometry.Octree()
 
 # tree.convert_from_point_cloud(pcd)

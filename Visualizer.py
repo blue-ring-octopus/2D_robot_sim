@@ -9,7 +9,7 @@ from copy import deepcopy
 import numpy as np
 
 class Visualizer:
-    def __init__(self,world, plot_resolution):
+    def __init__(self,world, plot_resolution, save_video=False):
         self.world=world
         self.plot_resolution=plot_resolution
         bkg_map=deepcopy(world.bkg_map)
@@ -21,7 +21,10 @@ class Visualizer:
             if obstacle.is_feature:
                 bkg_map=self.draw_features(bkg_map, obstacle.loc)
         self.bkg_map= bkg_map
-    
+        self.save_video=save_video
+        if save_video:
+            fourcc = cv2.VideoWriter_fourcc(*'MP4V')
+            self.video_writer = cv2.VideoWriter('output.mp4', fourcc, 20.0, (w,  h))
   
     def state_to_pixel(self, state):
          return (int((state[0]+self.world.origin[0])*self.plot_resolution),int((state[1]+self.world.origin[1])*self.plot_resolution))
@@ -77,6 +80,8 @@ class Visualizer:
             else:
                 color=(0,255,255)
             image=cv2.circle(image, x , int(0.05*self.plot_resolution),color, 2)
+            image=self.draw_uncertainty(image,node.x[0:2],np.linalg.inv(node.H)[0:2, 0:2]*10)
+            
         return image
     def draw_map(self, image):
         for point in self.world.robots[0].map:
@@ -84,6 +89,10 @@ class Visualizer:
             image=cv2.circle(image, loc , 1 ,(175,175,175), -11)
         return image
     
+    def terminate(self):
+        if self.save_video:
+            self.video_writer.release()
+
     def visualize(self):
         world=self.world
         image=deepcopy(self.bkg_map)
@@ -101,6 +110,9 @@ class Visualizer:
                 image= cv2.circle(image, (int(loc[0]),int(loc[1])), 2, (0,0,255), -1)
                 image=self.draw_uncertainty(image, world.robots[0].odom[2*i+3:2*i+5], world.robots[0].covariance[2*i+3:2*i+5, 2*i+3:2*i+5])
         image=self.draw_map(image)
-        cv2.imshow('test', cv2.flip(image, 0))
-
+        image=cv2.flip(image, 0)
+        if self.save_video:
+            self.video_writer.write(image)
+        cv2.imshow('test', image)
+        
 
